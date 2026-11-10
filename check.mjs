@@ -51,6 +51,11 @@ try {
 
   let auth
   let rejectRefresh = false
+  let quotaReply = { data: {
+    user: { id: 'fixture-user', name: 'Fixture', email: '' },
+    plan: { name: 'Fixture Plan', next_refresh_date: '2026-11-01T00:00:00Z' },
+    quota: { total: 2000, used: 17.8348, remaining: 1982.1652, exceeded: false },
+  } }
   // how the mock's agent_chat answers: a list of SSE bodies, one per call
   const agentReplies = []
   const sse = (delta, finish = null) => `data: ${JSON.stringify({ statusCodeValue: 200, body: JSON.stringify({ choices: [{ delta, finish_reason: finish }] }) })}\n\n`
@@ -64,11 +69,9 @@ try {
           assert.ok(url.searchParams.get('verifier'))
           return Response.json({ token: 'fake-device', refresh_token: 'fake-device-refresh', user_id: 'fixture-user', expires_in: 3600 })
         case '/api/v1/adapter/user/account-context':
-          return Response.json({ data: {
-            user: { id: 'fixture-user', name: 'Fixture', email: '' },
-            plan: { name: 'Fixture Plan', next_refresh_date: '2026-11-01T00:00:00Z' },
-            quota: { total: 2000, used: 17.8348, remaining: 1982.1652, exceeded: false },
-          } })
+          return Response.json(quotaReply)
+        case '/api/v1/adapter/user/wallets':
+          return Response.json({ data: { daily_credits: { total_balance: 0 }, longterm_credits: { total_balance: 2000 } } })
         case '/api/v1/deviceToken/refresh':
           assert.equal(body.target, 'c')
           if (rejectRefresh) return Response.json({ error: 'expired' }, { status: 401 })
@@ -100,7 +103,11 @@ try {
   const config = {}
   await plugin.config(config)
   assert.deepEqual(Object.keys(config.provider), ['qwenwork'])
-  assert.deepEqual(config.provider.qwenwork.models, {})
+  // the static catalog the provider has before a sign-in, so the window
+  // shows its models and an agent can pick one
+  assert.deepEqual(Object.keys(config.provider.qwenwork.models), ['flash', 'pro', 'qwen3.8-max-preview'])
+  assert.equal(config.provider.qwenwork.models.flash.limit.context, 1_000_000)
+  assert.equal(config.provider.qwenwork.models.flash.attachment, true)
   assert.equal(plugin.auth.provider, 'qwenwork')
   assert.equal(typeof plugin.auth.usage, 'function', 'the provider reports usage')
   assert.match(plugin.auth.icon, /^data:image\/png;base64,/, 'the provider carries its own icon')
@@ -119,12 +126,25 @@ try {
 
   const usage = await plugin.auth.usage(async () => auth)
   assert.equal(usage.signIn, 'kept')
+  assert.equal(usage.user, 'Fixture', 'the account name comes back with its usage')
   assert.equal(usage.plan, 'Fixture Plan')
   assert.equal(usage.until, '2026-11-01T00:00:00.000Z')
-  assert.deepEqual(usage.windows, [{ name: 'Credits', used: (100 * 17.8348) / 2000, display: '17.83 / 2000 credits' }])
+  assert.deepEqual(usage.windows, [{ name: 'Credits', used: (100 * 17.8348) / 2000, display: '17.83 / 2000 credits', amount: 17.8348, limit: 2000, unit: 'credits' }])
   const usageGone = await plugin.auth.usage(async () => ({ ...auth, expires: Date.now() - 1 }))
   assert.equal(usageGone.signIn, 'expired')
-  checks.push('Usage reports the account\'s credits and plan')
+  // A personal account: quota {total: null, used: null, remaining: 6100}.
+  // There is no share to show, so what is left is the balance, with the pools.
+  quotaReply = { data: { user: { name: 'Fixture' }, plan: { name: 'Fixture Plan' }, quota: { total: null, used: null, remaining: 6100, exceeded: false } } }
+  const sparing = await plugin.auth.usage(async () => auth)
+  assert.equal(sparing.windows, undefined, 'no share of an unknown total is made up')
+  assert.equal(sparing.balance, '6100 credits (long-term 2000)')
+  assert.equal(sparing.user, 'Fixture')
+  // spent: the account is out of credits, said as a window so routing sees it
+  quotaReply = { data: { plan: { name: 'Fixture Plan' }, quota: { total: null, used: null, remaining: 0, exceeded: true } } }
+  const spent = await plugin.auth.usage(async () => auth)
+  assert.deepEqual(spent.windows, [{ name: 'Credits', used: 100, display: 'no credits left' }])
+  quotaReply = { data: { user: { name: 'Fixture' }, plan: { name: 'Fixture Plan', next_refresh_date: '2026-11-01T00:00:00Z' }, quota: { total: 2000, used: 17.8348, remaining: 1982.1652, exceeded: false } } }
+  checks.push('Usage reports the account\'s credits, plan and name')
 
   const loader = await plugin.auth.loader(async () => auth)
   const chat = (over = {}) => ({ model: 'fixture-model', messages: [{ role: 'user', content: 'fixture prompt' }], ...over })

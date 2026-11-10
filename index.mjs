@@ -32,11 +32,46 @@ const num = (v) => {
   return String(Math.round(n * 100) / 100)
 }
 
-// qwenworkUsage reads the account's credits for magpie's usage bar. The
-// account-context the sign-in already uses carries them: quota {total, used,
-// remaining, exceeded} in the plan's credit unit, and plan {name, next_refresh
-// / next_due}. One window is one pool of credits; when the plan refreshes, that
-// time is the window's reset.
+// The account's catalog, as the desktop app lists it (qwork scene), for the
+// window before a sign-in and for a listing that can't be read: without a
+// static list the provider shows no models at all and no agent can pick one.
+const MODELS = [
+  { id: 'flash', name: '标准', context: 1_000_000, images: true },
+  { id: 'pro', name: '高级', context: 1_000_000, images: true },
+  { id: 'qwen3.8-max-preview', name: 'Qwen3.8-Max', context: 1_000_000, images: true },
+]
+
+const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+// the client's unwrapAdapterResponse: the envelope's data object, else the
+// envelope itself
+const unwrap = (v) => (v?.data && typeof v.data === 'object' && !Array.isArray(v.data) ? v.data : (v && typeof v === 'object' ? v : {}))
+
+// The credit pools QwenWork's own client reads beside the plan's quota
+// (fetchUserWallets): each pool's total_balance. A pool it doesn't have, or
+// one at 0, is left out; the read failing is not a usage failure.
+const POOLS = [['daily_credits', 'daily'], ['monthly_credits', 'monthly'], ['longterm_credits', 'long-term']]
+async function walletPools(openapi, access) {
+  try {
+    const res = await fetch(`${openapi}/api/v1/adapter/user/wallets`, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${access}` },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) return []
+    const data = unwrap(await res.json())
+    const out = []
+    for (const [key, name] of POOLS) {
+      const n = finite(data[key]?.total_balance)
+      if (n !== undefined && n > 0) out.push(`${name} ${num(n)}`)
+    }
+    return out
+  } catch { return [] }
+}
+
+// qwenworkUsage reads the account for magpie's usage bar: plan, name and
+// credits. A personal account's quota has total and used null and only what
+// is left, so that is the balance (with its pools, when it has any) rather
+// than a share made up; an account with a total keeps its used / total
+// window. Reading it also refreshes the name and plan the panel shows.
 function qwenworkUsage(openapi) {
   return async (getAuth) => {
     let signIn = 'kept'
@@ -49,21 +84,29 @@ function qwenworkUsage(openapi) {
       })
       if (res.status === 401 || res.status === 403) return { error: 'QwenWork: the sign-in lapsed — sign in again', signIn: 'expired' }
       if (!res.ok) return { error: `QwenWork: usage read failed (HTTP ${res.status})`, signIn }
-      const ctx = (await res.json())?.data ?? {}
-      const q = ctx.quota
+      const ctx = unwrap(await res.json())
       const out = { signIn }
+      const name = ctx.user?.name || a.name
+      if (name) out.user = String(name)
       if (ctx.plan?.name) out.plan = String(ctx.plan.name)
       const refresh = ctx.plan?.next_refresh_date ?? ctx.plan?.next_due_date
       if (refresh) out.until = new Date(refresh).toISOString()
-      if (q && typeof q === 'object') {
-        const total = Number(q.total)
-        const remaining = Number(q.remaining)
-        const used = Number.isFinite(Number(q.used)) ? Number(q.used) : total - remaining
-        if (Number.isFinite(total) && total > 0 && Number.isFinite(used) && used >= 0) {
-          out.windows = [{ name: 'Credits', used: Math.min(100, (100 * used) / total), display: `${num(used)} / ${num(total)} credits` }]
-        }
+      const q = ctx.quota && typeof ctx.quota === 'object' ? ctx.quota : {}
+      const total = finite(q.total)
+      const remaining = finite(q.remaining)
+      const used = finite(q.used) ?? (total !== undefined && remaining !== undefined ? total - remaining : undefined)
+      if (total !== undefined && total > 0 && used !== undefined && used >= 0) {
+        out.windows = [{ name: 'Credits', used: Math.min(100, (100 * used) / total), display: `${num(used)} / ${num(total)} credits`, amount: used, limit: total, unit: 'credits' }]
       }
-      if (!out.windows) out.error = 'QwenWork: the account reports no credits'
+      if (remaining !== undefined) {
+        const pools = await walletPools(openapi, a.access)
+        out.balance = `${num(remaining)} credits${pools.length ? ` (${pools.join(' · ')})` : ''}`
+        // nothing left stops the account: say so as a spent window, since
+        // there is no total to show a share of
+        const exceeded = q.exceeded === true || q.is_quota_exceeded === true || remaining <= 0
+        if (!out.windows && exceeded) out.windows = [{ name: 'Credits', used: 100, display: 'no credits left' }]
+      }
+      if (!out.windows && out.balance === undefined) out.error = 'QwenWork: the account reports no credits'
       return out
     } catch (e) {
       return { error: String(e?.message ?? e), signIn }
@@ -85,7 +128,7 @@ export async function QwenWorkAuthPlugin({ client }) {
     clientType: '6', businessProduct: 'qoder_work', sessionType: 'qoder_work',
     userInfoPath: '/api/v1/adapter/user/account-context?include=user,plan,quota,page,data_sharing',
     normalizeUser: v => (v?.data ?? v)?.user ?? (v?.data ?? v),
-    models: [],
+    models: MODELS,
     // The adapter prefixes this under the host's own system messages; worded
     // for QwenWork, not the Qoder brand the adapter was shared from.
     systemPrompt: 'You are QwenWork (qw), a helpful assistant. Use the instructions below and the tools available to you to assist the user.',

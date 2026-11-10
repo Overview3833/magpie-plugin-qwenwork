@@ -61,7 +61,7 @@ async function walletPools(openapi, access) {
     const out = []
     for (const [key, name] of POOLS) {
       const n = finite(data[key]?.total_balance)
-      if (n !== undefined && n > 0) out.push(`${name} ${num(n)}`)
+      if (n !== undefined && n > 0) out.push({ name, balance: n })
     }
     return out
   } catch { return [] }
@@ -100,11 +100,16 @@ function qwenworkUsage(openapi) {
       }
       if (remaining !== undefined) {
         const pools = await walletPools(openapi, a.access)
-        out.balance = `${num(remaining)} credits${pools.length ? ` (${pools.join(' · ')})` : ''}`
-        // nothing left stops the account: say so as a spent window, since
-        // there is no total to show a share of
-        const exceeded = q.exceeded === true || q.is_quota_exceeded === true || remaining <= 0
-        if (!out.windows && exceeded) out.windows = [{ name: 'Credits', used: 100, display: 'no credits left' }]
+        out.balance = `${num(remaining)} credits${pools.length ? ` (${pools.map((p) => `${p.name} ${num(p.balance)}`).join(' · ')})` : ''}`
+        // A vendor that reports no total still has to say what is left in the
+        // shape magpie reads: a prepaid wallet window (balance + unit, no
+        // used), the total first because that is what stops the account, then
+        // the pools it is made of as aside windows, which routing doesn't
+        // weigh — so a smaller pool doesn't read as the account running out.
+        if (!out.windows) out.windows = [
+          { name: 'Credits', balance: remaining, unit: 'credits' },
+          ...pools.map((p) => ({ name: `${p.name} credits`, balance: p.balance, unit: 'credits', aside: true })),
+        ]
       }
       if (!out.windows && out.balance === undefined) out.error = 'QwenWork: the account reports no credits'
       return out

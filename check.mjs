@@ -133,16 +133,23 @@ try {
   const usageGone = await plugin.auth.usage(async () => ({ ...auth, expires: Date.now() - 1 }))
   assert.equal(usageGone.signIn, 'expired')
   // A personal account: quota {total: null, used: null, remaining: 6100}.
-  // There is no share to show, so what is left is the balance, with the pools.
+  // There is no share to show, so what is left is a wallet window magpie's
+  // routing reads, with the pools it is made of beside it.
   quotaReply = { data: { user: { name: 'Fixture' }, plan: { name: 'Fixture Plan' }, quota: { total: null, used: null, remaining: 6100, exceeded: false } } }
   const sparing = await plugin.auth.usage(async () => auth)
-  assert.equal(sparing.windows, undefined, 'no share of an unknown total is made up')
+  assert.deepEqual(sparing.windows, [
+    { name: 'Credits', balance: 6100, unit: 'credits' },
+    { name: 'long-term credits', balance: 2000, unit: 'credits', aside: true },
+  ], 'a wallet window routing can read, the pools aside')
   assert.equal(sparing.balance, '6100 credits (long-term 2000)')
   assert.equal(sparing.user, 'Fixture')
-  // spent: the account is out of credits, said as a window so routing sees it
+  // spent: what is left is 0, which the wallet window says as it is
   quotaReply = { data: { plan: { name: 'Fixture Plan' }, quota: { total: null, used: null, remaining: 0, exceeded: true } } }
   const spent = await plugin.auth.usage(async () => auth)
-  assert.deepEqual(spent.windows, [{ name: 'Credits', used: 100, display: 'no credits left' }])
+  assert.deepEqual(spent.windows, [
+    { name: 'Credits', balance: 0, unit: 'credits' },
+    { name: 'long-term credits', balance: 2000, unit: 'credits', aside: true },
+  ])
   quotaReply = { data: { user: { name: 'Fixture' }, plan: { name: 'Fixture Plan', next_refresh_date: '2026-11-01T00:00:00Z' }, quota: { total: 2000, used: 17.8348, remaining: 1982.1652, exceeded: false } } }
   checks.push('Usage reports the account\'s credits, plan and name')
 
